@@ -21,22 +21,32 @@ import (
 //
 type Data struct {
 	Basename string `yaml:"basename,omitempty"`
+	Eat      bool   `yaml:"eatMatches"`
+	Listen   string `yaml:"listen"`
+	Path     string `yaml:"path"`
 	Metrics  []struct {
 		Name        string `yaml:"name,omitempty"`
 		Description string `yaml:"description,omitempty"`
 		Regex       string `yaml:"regex,omitempty"`
-		PromType    string `yaml:"type,omitempty"`
+		Gauge       bool   `yaml:"gauge"`
 		Collector   prometheus.Collector
 		Compiled    *regexp.Regexp
 	} `yaml:"metrics,omitempty"`
 }
 
 var (
-	yam    Data
-	eat    = flag.Bool("eat", false, "Eat matching lines.")
+	// some defaults
+	cnf = Data{
+		Listen: ":9000",
+		Path:   "/metrics",
+		Eat:    false,
+	}
+
+	// parameters
 	debug  = flag.Bool("debug", false, "Display more of the inner workings.")
 	config = flag.String("config", "metrics.yml", "Config file.")
 
+	// some metrics for ourself
 	totalLines = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "stdout2prom_lines_parsed_total",
@@ -57,6 +67,13 @@ var (
 			Help: "Total lines that matched one of the regexes",
 		},
 	)
+
+	badFloats = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stdout2prom_bad_floats_total",
+			Help: "Total lines that failed to convert correctly",
+		},
+	)
 )
 
 func main() {
@@ -65,20 +82,22 @@ func main() {
 
 	data, err := ioutil.ReadFile(*config)
 	if err != nil {
+		fmt.Println("Failed to open config file")
 		panic(err.Error())
 	}
 
-	err = yaml.Unmarshal(data, &yam)
+	err = yaml.Unmarshal(data, &cnf)
 	if err != nil {
+		fmt.Println("Failed to parse YAML file")
 		panic(err.Error())
 	}
 
-	for index, metric := range yam.Metrics {
+	for index, metric := range cnf.Metrics {
 
-		metricName := fmt.Sprintf("%s_%s", yam.Basename, metric.Name)
+		metricName := cnf.Basename + "_" + metric.Name
 
-		if metric.PromType == "gauge" {
-			yam.Metrics[index].Collector = prometheus.NewGauge(
+		if metric.Gauge {
+			cnf.Metrics[index].Collector = prometheus.NewGauge(
 				prometheus.GaugeOpts{
 					Name: metricName,
 					Help: metric.Description,
@@ -86,14 +105,16 @@ func main() {
 
 		} else {
 
-			yam.Metrics[index].Collector = prometheus.NewGauge(
-				prometheus.GaugeOpts{
+			cnf.Metrics[index].Collector = prometheus.NewCounter(
+				prometheus.CounterOpts{
 					Name: metricName,
 					Help: metric.Description,
 				})
 		}
-		prometheus.MustRegister(yam.Metrics[index].Collector)
-		yam.Metrics[index].Compiled = regexp.MustCompile(metric.Regex)
+
+		prometheus.MustRegister(cnf.Metrics[index].Collector)
+		cnf.Metrics[index].Compiled = regexp.MustCompile(metric.Regex)
+
 		if *debug {
 			fmt.Printf("Added metric for %s\n", metricName)
 		}
@@ -107,18 +128,9 @@ func main() {
 	prometheus.MustRegister(bytesRead)
 	prometheus.MustRegister(matchedLines)
 
-	//
-	// Start up the metrics endpoint
-	//
-	http.Handle("/metrics", prometheus.Handler())
-	go http.ListenAndServe(":9000", nil)
+	http.Handle(cnf.Path, prometheus.Handler())
+	go http.ListenAndServe(cnf.Listen, nil)
 
-	//
-	// read from stdin
-	//  - check against each regex
-	//  - update metric on match
-	//  - eat/filter output
-	//
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -126,7 +138,7 @@ func main() {
 		totalLines.Inc()
 		bytesRead.Add(float64(len(line)))
 
-		for _, metric := range yam.Metrics {
+		for _, metric := range cnf.Metrics {
 			if *debug {
 				fmt.Printf("Testing against %s\n", metric.Name)
 			}
@@ -137,10 +149,13 @@ func main() {
 
 				matchedLines.Inc()
 
-				if metric.PromType == "gauge" {
+				if metric.Gauge {
 					if s, err := strconv.ParseFloat(result[1], 64); err == nil {
 						metric.Collector.(prometheus.Gauge).Set(s)
+					} else {
+						badFloats.Inc()
 					}
+
 				} else {
 					metric.Collector.(prometheus.Counter).Inc()
 				}
@@ -151,7 +166,7 @@ func main() {
 			}
 		}
 
-		if *eat == false {
+		if cnf.Eat == false {
 			fmt.Println(line)
 		}
 

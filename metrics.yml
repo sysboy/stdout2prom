@@ -1,5 +1,7 @@
 ---
 basename: "myMetrics"
+eatMatches: false
+listen: ":9000"
 metrics:
   - name: "packetsIn"
     description: "Number of input packets"
@@ -9,7 +11,7 @@ metrics:
     description: "Count of the output packets"
   - name: "inputs"
     regex: '^input\s+(\d+)'
-    type: gauge
+    gauge: true
     description: "numbers starting with input"
 
 
