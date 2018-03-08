@@ -1,6 +1,7 @@
 ---
 basename: "myMetrics"
 eatMatches: false
+eatAll: true
 listen: ":9000"
 metrics:
   - name: "packetsIn"

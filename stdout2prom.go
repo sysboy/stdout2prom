@@ -8,9 +8,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"regexp"
+	"runtime/pprof"
 	"strconv"
 )
 
@@ -20,11 +22,12 @@ import (
 // and regexes are created for each metric.
 //
 type Data struct {
-	Basename string `yaml:"basename,omitempty"`
-	Eat      bool   `yaml:"eatMatches"`
-	Listen   string `yaml:"listen"`
-	Path     string `yaml:"path"`
-	Metrics  []struct {
+	Basename   string `yaml:"basename,omitempty"`
+	EatMatches bool   `yaml:"eatMatches"`
+	EatAll     bool   `yaml:"eatAll"`
+	Listen     string `yaml:"listen"`
+	Path       string `yaml:"path"`
+	Metrics    []struct {
 		Name        string `yaml:"name,omitempty"`
 		Description string `yaml:"description,omitempty"`
 		Regex       string `yaml:"regex,omitempty"`
@@ -37,14 +40,16 @@ type Data struct {
 var (
 	// some defaults
 	cnf = Data{
-		Listen: ":9000",
-		Path:   "/metrics",
-		Eat:    false,
+		Listen:     ":9000",
+		Path:       "/metrics",
+		EatMatches: false,
+		EatAll:     false,
 	}
 
 	// parameters
-	debug  = flag.Bool("debug", false, "Display more of the inner workings.")
-	config = flag.String("config", "metrics.yml", "Config file.")
+	debug      = flag.Bool("debug", false, "Display more of the inner workings.")
+	config     = flag.String("config", "metrics.yml", "Config file.")
+	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 
 	// some metrics for ourself
 	totalLines = prometheus.NewCounter(
@@ -79,7 +84,14 @@ var (
 func main() {
 
 	flag.Parse()
-
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 	data, err := ioutil.ReadFile(*config)
 	if err != nil {
 		fmt.Println("Failed to open config file")
@@ -138,6 +150,7 @@ func main() {
 		totalLines.Inc()
 		bytesRead.Add(float64(len(line)))
 
+		matchFound := false
 		for _, metric := range cnf.Metrics {
 			if *debug {
 				fmt.Printf("Testing against %s\n", metric.Name)
@@ -148,6 +161,7 @@ func main() {
 			if result != nil {
 
 				matchedLines.Inc()
+				matchFound = true
 
 				if metric.Gauge {
 					if s, err := strconv.ParseFloat(result[1], 64); err == nil {
@@ -166,9 +180,13 @@ func main() {
 			}
 		}
 
-		if cnf.Eat == false {
-			fmt.Println(line)
+		if cnf.EatAll {
+			continue
 		}
+		if matchFound && cnf.EatMatches {
+			continue
+		}
+		fmt.Println(line)
 
 	}
 
