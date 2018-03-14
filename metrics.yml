@@ -1,18 +1,32 @@
 ---
 basename: "myMetrics"
 eatMatches: false
-eatAll: true
+eatAll: false
 listen: ":9000"
+
 metrics:
-  - name: "packetsIn"
-    description: "Number of input packets"
-    regex: "input packet"
+  - name: "post"
+    description: "Post times of input packets"
+    regex: '.*POST\s+.*\s+(?P<returncode>\d+)\s+(?P<response>\d+)ms'
+    value: "response"
+    labels:
+      - "returncode"
+
   - name: "packetsOut"
     regex: "output packet"
     description: "Count of the output packets"
+
   - name: "inputs"
-    regex: '^input\s+(\d+)'
-    gauge: true
-    description: "numbers starting with input"
+    regex: '^input\s+(?P<steve>\d+)'
+    description: "strings starting with input"
+    value: "steve"
+
+  - name: "gets"
+    description: "GET times"
+    regex: '.*INFO\s+\[parkour-api:(?P<function>\w)\]\s+.*\s+GET\s+.*\s+(?P<returncode>\d+)\s+(?P<response>\d+)ms'
+    value: "response"
+    labels:
+      - "function"
+      - "returncode"
 
 

@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
@@ -28,12 +29,14 @@ type Data struct {
 	Listen     string `yaml:"listen"`
 	Path       string `yaml:"path"`
 	Metrics    []struct {
-		Name        string `yaml:"name,omitempty"`
-		Description string `yaml:"description,omitempty"`
-		Regex       string `yaml:"regex,omitempty"`
-		Gauge       bool   `yaml:"gauge"`
+		Name        string   `yaml:"name,omitempty"`
+		Description string   `yaml:"description,omitempty"`
+		Regex       string   `yaml:"regex,omitempty"`
+		Value       string   `yaml:"value,omitempty"`
+		Labels      []string `yaml:"labels,omitempty"`
 		Collector   prometheus.Collector
 		Compiled    *regexp.Regexp
+		GroupName   []string
 	} `yaml:"metrics,omitempty"`
 }
 
@@ -50,6 +53,8 @@ var (
 	debug      = flag.Bool("debug", false, "Display more of the inner workings.")
 	config     = flag.String("config", "metrics.yml", "Config file.")
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+	labels     prometheus.Labels
+	value      float64
 
 	// some metrics for ourself
 	totalLines = prometheus.NewCounter(
@@ -107,28 +112,68 @@ func main() {
 	for index, metric := range cnf.Metrics {
 
 		metricName := cnf.Basename + "_" + metric.Name
-
-		if metric.Gauge {
-			cnf.Metrics[index].Collector = prometheus.NewGauge(
-				prometheus.GaugeOpts{
-					Name: metricName,
-					Help: metric.Description,
-				})
-
-		} else {
-
-			cnf.Metrics[index].Collector = prometheus.NewCounter(
-				prometheus.CounterOpts{
-					Name: metricName,
-					Help: metric.Description,
-				})
-		}
-
-		prometheus.MustRegister(cnf.Metrics[index].Collector)
 		cnf.Metrics[index].Compiled = regexp.MustCompile(metric.Regex)
+		cnf.Metrics[index].GroupName = cnf.Metrics[index].Compiled.SubexpNames()
 
 		if *debug {
 			fmt.Printf("Added metric for %s\n", metricName)
+		}
+		if metric.Value != "" {
+
+			// metrics that have labels
+			if len(metric.Labels) > 0 {
+				cnf.Metrics[index].Collector = prometheus.NewGaugeVec(
+					prometheus.GaugeOpts{
+						Name: metricName,
+						Help: metric.Description,
+					},
+					metric.Labels,
+				)
+				if *debug {
+					fmt.Println("   Type GaugeVec")
+				}
+
+			} else {
+				cnf.Metrics[index].Collector = prometheus.NewGauge(
+					prometheus.GaugeOpts{
+						Name: metricName,
+						Help: metric.Description,
+					})
+				if *debug {
+					fmt.Println("   Type Gauge")
+				}
+			}
+
+		} else {
+
+			if len(metric.Labels) > 0 {
+				cnf.Metrics[index].Collector = prometheus.NewCounterVec(
+					prometheus.CounterOpts{
+						Name: metricName,
+						Help: metric.Description,
+					},
+					metric.Labels,
+				)
+				if *debug {
+					fmt.Println("   Type CounterVec")
+				}
+			} else {
+				cnf.Metrics[index].Collector = prometheus.NewCounter(
+					prometheus.CounterOpts{
+						Name: metricName,
+						Help: metric.Description,
+					})
+				if *debug {
+					fmt.Println("   Type Counter")
+				}
+			}
+		}
+
+		prometheus.MustRegister(cnf.Metrics[index].Collector)
+
+		if *debug {
+			fmt.Printf("   Value group name is %s\n", cnf.Metrics[index].Value)
+			fmt.Printf("   Labels are %v\n", cnf.Metrics[index].Labels)
 		}
 
 	}
@@ -149,36 +194,103 @@ func main() {
 
 		totalLines.Inc()
 		bytesRead.Add(float64(len(line)))
-
 		matchFound := false
+
 		for _, metric := range cnf.Metrics {
+
 			if *debug {
-				fmt.Printf("Testing against %s\n", metric.Name)
+				fmt.Printf("Testing against metric [%s]\n", metric.Name)
 			}
+
+			//
+			// There are two types of metric
+			// Gauge - goes up and down.
+			// Counter - goes up or down.
+			//
+			// Either can have labels attached
+			//
 
 			result := metric.Compiled.FindStringSubmatch(line)
 
-			if result != nil {
+			if len(result) != 0 {
 
 				matchedLines.Inc()
 				matchFound = true
-
-				if metric.Gauge {
-					if s, err := strconv.ParseFloat(result[1], 64); err == nil {
-						metric.Collector.(prometheus.Gauge).Set(s)
-					} else {
-						badFloats.Inc()
-					}
-
-				} else {
-					metric.Collector.(prometheus.Counter).Inc()
-				}
-
 				if *debug {
 					fmt.Printf(" ** Match **\n")
 				}
-			}
-		}
+
+				//
+				// If we named our value, then search through
+				// the results for it.
+				//
+				if metric.Value != "" {
+					value, err = getValue(metric.Value,
+						metric.GroupName,
+						result)
+					if err != nil {
+						badFloats.Inc()
+						continue
+					}
+					if *debug {
+						fmt.Printf("Value = %.4f\n", value)
+					}
+				}
+
+				//
+				// If we have labels to attach, search through
+				// the results and create a prometheus.Labels
+				// structure.
+				//
+				if len(metric.Labels) > 0 {
+					labels, err = getLabels(metric.Labels,
+						metric.GroupName,
+						result)
+					if err != nil {
+						fmt.Println("problems finding labels")
+					}
+				}
+
+				//
+				// There is probably some coolkid golang way to
+				// this...
+				//
+				if metric.Value == "" {
+					// counter
+					if len(metric.Labels) > 0 {
+						// counter + labels
+						metric.Collector.(*prometheus.CounterVec).With(labels).Inc()
+						if *debug {
+							fmt.Printf("CounterVecLabels.Inc() [%+v]\n",
+								labels)
+						}
+					} else {
+						// counter
+						metric.Collector.(prometheus.Counter).Inc()
+						if *debug {
+							fmt.Printf("CounterVec.Inc()\n")
+						}
+					}
+				} else {
+					// gauge
+					if len(metric.Labels) > 0 {
+						// gauge + labels + values
+						metric.Collector.(*prometheus.GaugeVec).With(labels).Set(value)
+						if *debug {
+							fmt.Printf("GaugeVecLabels.Set(%.4f) [%+v]\n", value, labels)
+						}
+					} else {
+						// gauge + values
+						metric.Collector.(prometheus.Gauge).Set(value)
+						if *debug {
+							fmt.Printf("GaugeVec.Set(%.4f)\n", value, labels)
+						}
+					}
+
+				}
+			} // for metrics
+
+		} // len(result) != 0
 
 		if cnf.EatAll {
 			continue
@@ -188,6 +300,58 @@ func main() {
 		}
 		fmt.Println(line)
 
+	} // for scanner
+
+}
+
+func getValue(valueName string,
+	groupNames []string,
+	results []string) (float64, error) {
+	//
+	// find the index of this value in the list of groups
+	//
+	idx := indexOf(valueName, groupNames)
+
+	//
+	// grab it from the results, convert it to a float
+	//
+	value, err := strconv.ParseFloat(results[idx], 64)
+
+	if err != nil {
+		return 0.0, err
+	}
+	return value, nil
+}
+
+func getLabels(labelNames []string,
+	groupNames []string,
+	results []string) (prometheus.Labels, error) {
+
+	value := prometheus.Labels{}
+
+	for _, labelName := range labelNames {
+		//
+		// find the index of this label in the list of groups
+		//
+		idx := indexOf(labelName, groupNames)
+		if idx == -1 {
+			return nil, errors.New("couldn't find label in results")
+		}
+
+		//
+		// grab it from the results, bung it in the value struct
+		//
+		value[labelName] = results[idx]
 	}
 
+	return value, nil
+}
+
+func indexOf(word string, data []string) int {
+	for k, v := range data {
+		if word == v {
+			return k
+		}
+	}
+	return -1
 }
