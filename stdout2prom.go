@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime/pprof"
 	"strconv"
+	"time"
 )
 
 //
@@ -53,8 +54,10 @@ var (
 	debug      = flag.Bool("debug", false, "Display more of the inner workings.")
 	config     = flag.String("config", "metrics.yml", "Config file.")
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
-	labels     prometheus.Labels
-	value      float64
+	tardy      = flag.Int("tardy", 0, "Hang around for X seconds after stdin closes")
+
+	labels prometheus.Labels
+	value  float64
 
 	// some metrics for ourself
 	totalLines = prometheus.NewCounter(
@@ -99,14 +102,12 @@ func main() {
 	}
 	data, err := ioutil.ReadFile(*config)
 	if err != nil {
-		fmt.Println("Failed to open config file")
-		panic(err.Error())
+		log.Fatalf("Failed to open config file, %v", err)
 	}
 
 	err = yaml.Unmarshal(data, &cnf)
 	if err != nil {
-		fmt.Println("Failed to parse YAML file")
-		panic(err.Error())
+		log.Fatalf("Failed to parse YAML file, %v", err)
 	}
 
 	for index, metric := range cnf.Metrics {
@@ -116,7 +117,7 @@ func main() {
 		cnf.Metrics[index].GroupName = cnf.Metrics[index].Compiled.SubexpNames()
 
 		if *debug {
-			fmt.Printf("Added metric for %s\n", metricName)
+			log.Printf("Added metric for %s\n", metricName)
 		}
 		if metric.Value != "" {
 
@@ -130,7 +131,7 @@ func main() {
 					metric.Labels,
 				)
 				if *debug {
-					fmt.Println("   Type GaugeVec")
+					log.Println("   Type GaugeVec")
 				}
 
 			} else {
@@ -140,7 +141,7 @@ func main() {
 						Help: metric.Description,
 					})
 				if *debug {
-					fmt.Println("   Type Gauge")
+					log.Println("   Type Gauge")
 				}
 			}
 
@@ -155,7 +156,7 @@ func main() {
 					metric.Labels,
 				)
 				if *debug {
-					fmt.Println("   Type CounterVec")
+					log.Println("   Type CounterVec")
 				}
 			} else {
 				cnf.Metrics[index].Collector = prometheus.NewCounter(
@@ -164,7 +165,7 @@ func main() {
 						Help: metric.Description,
 					})
 				if *debug {
-					fmt.Println("   Type Counter")
+					log.Println("   Type Counter")
 				}
 			}
 		}
@@ -172,8 +173,8 @@ func main() {
 		prometheus.MustRegister(cnf.Metrics[index].Collector)
 
 		if *debug {
-			fmt.Printf("   Value group name is %s\n", cnf.Metrics[index].Value)
-			fmt.Printf("   Labels are %v\n", cnf.Metrics[index].Labels)
+			log.Printf("   Value group name is %s\n", cnf.Metrics[index].Value)
+			log.Printf("   Labels are %v\n", cnf.Metrics[index].Labels)
 		}
 
 	}
@@ -199,7 +200,7 @@ func main() {
 		for _, metric := range cnf.Metrics {
 
 			if *debug {
-				fmt.Printf("Testing against metric [%s]\n", metric.Name)
+				log.Printf("Testing against metric [%s]\n", metric.Name)
 			}
 
 			//
@@ -217,7 +218,7 @@ func main() {
 				matchedLines.Inc()
 				matchFound = true
 				if *debug {
-					fmt.Printf(" ** Match **\n")
+					log.Printf(" ** Match **\n")
 				}
 
 				//
@@ -233,7 +234,7 @@ func main() {
 						continue
 					}
 					if *debug {
-						fmt.Printf("Value = %.4f\n", value)
+						log.Printf("Value = %.4f\n", value)
 					}
 				}
 
@@ -247,7 +248,7 @@ func main() {
 						metric.GroupName,
 						result)
 					if err != nil {
-						fmt.Println("problems finding labels")
+						log.Println("problems finding labels")
 					}
 				}
 
@@ -261,14 +262,14 @@ func main() {
 						// counter + labels
 						metric.Collector.(*prometheus.CounterVec).With(labels).Inc()
 						if *debug {
-							fmt.Printf("CounterVecLabels.Inc() [%+v]\n",
+							log.Printf("CounterVecLabels.Inc() [%+v]\n",
 								labels)
 						}
 					} else {
 						// counter
 						metric.Collector.(prometheus.Counter).Inc()
 						if *debug {
-							fmt.Printf("CounterVec.Inc()\n")
+							log.Printf("CounterVec.Inc()\n")
 						}
 					}
 				} else {
@@ -277,13 +278,13 @@ func main() {
 						// gauge + labels + values
 						metric.Collector.(*prometheus.GaugeVec).With(labels).Set(value)
 						if *debug {
-							fmt.Printf("GaugeVecLabels.Set(%.4f) [%+v]\n", value, labels)
+							log.Printf("GaugeVecLabels.Set(%.4f) [%+v]\n", value, labels)
 						}
 					} else {
 						// gauge + values
 						metric.Collector.(prometheus.Gauge).Set(value)
 						if *debug {
-							fmt.Printf("GaugeVec.Set(%.4f)\n", value, labels)
+							log.Printf("GaugeVec.Set(%.4f)\n", value, labels)
 						}
 					}
 
@@ -301,6 +302,11 @@ func main() {
 		fmt.Println(line)
 
 	} // for scanner
+
+	if *tardy != 0 {
+		log.Printf("Stdin closed, waiting %d seconds", *tardy)
+		time.Sleep(time.Duration(*tardy*1000) * time.Millisecond)
+	}
 
 }
 
